@@ -19,7 +19,7 @@ item_patterns = [
     re.compile(r"You finished mining (.+?)\."),
     re.compile(r"You finished harvesting (.+?)\."),
 ]
-location_pattern = re.compile(r"Your location:\s([\d.]+)\s([\d.]+)\s([\d.]+)")
+location_pattern = re.compile(r"Your location:\s([\d.-]+)\s([\d.-]+)\s([\d.-]+)\s([\d.-]+)")
 
 # Global variables
 monitor_region = None
