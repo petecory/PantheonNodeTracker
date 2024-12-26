@@ -20,7 +20,7 @@ item_patterns = [
     re.compile(r"You finished mining (.+?)\."),
     re.compile(r"You finished harvesting (.+?)\."),
 ]
-mob_pattern = re.compile(r"(.+?) (?:is .*?|eyes you .*?)\.")
+mob_pattern = re.compile(r"(.+?) (?:is .*?|eyes you|acknowledges you .*?)\.")
 
 location_pattern = re.compile(r"Your location:\s([\d.-]+)\s([\d.-]+)\s([\d.-]+)")
 
@@ -216,16 +216,16 @@ def process_mob_data(text, existing_entries, writer, threshold=10):
         if not line:  # Skip blank lines
             continue
         if "Your location:" in line:
-            # If we already have mob info, save the combined entry
+            # Save the previous mob info if it exists
             if current_mob_info and current_location:
                 combined_entries.append((current_mob_info, current_location))
             current_location = line  # Start a new location
             current_mob_info = []  # Reset mob info
         else:
-            # Append any non-location lines to mob info
+            # Append non-location lines to mob info
             current_mob_info.append(line)
 
-    # Add the last entry if we have leftover data
+    # Save the last mob info if it exists
     if current_mob_info and current_location:
         combined_entries.append((current_mob_info, current_location))
 
@@ -245,6 +245,7 @@ def process_mob_data(text, existing_entries, writer, threshold=10):
             mob_name = match_mob.group(1)
             new_entry = (mob_name, *location)
 
+            # Deduplicate entries
             if is_unique(existing_entries, new_entry, threshold):
                 mob_data.append(new_entry)
                 existing_entries.append(new_entry)
