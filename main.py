@@ -20,7 +20,7 @@ item_patterns = [
     re.compile(r"You finished mining (.+?)\."),
     re.compile(r"You finished harvesting (.+?)\."),
 ]
-mob_pattern = re.compile(r"(.+?) is .*?\.")
+mob_pattern = re.compile(r"(.+?) (?:is .*?|eyes you .*?)\.")
 
 location_pattern = re.compile(r"Your location:\s([\d.-]+)\s([\d.-]+)\s([\d.-]+)")
 
