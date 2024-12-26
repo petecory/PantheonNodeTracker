@@ -7,7 +7,7 @@ A Python-based tool for tracking resource nodes and mob locations in Pantheon us
 ## Features
 
 - **Node Tracking**: Captures harvested node data (e.g., wood, minerals) with location coordinates.
-- **Mob Tracking**: Records mob locations and their status in the game world.
+- **Mob Tracking**: Records mob locations in the game world.
 - **CSV Output**: Saves node and mob data into separate CSV files.
 - **API Upload**: Optionally uploads node data to a configurable API.
 - **Configurable**: Settings such as monitor region, API key, and CSV file locations are saved in a configuration file for easy reloading.
