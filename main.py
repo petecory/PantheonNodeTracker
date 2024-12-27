@@ -14,15 +14,17 @@ import sys
 import requests
 import configparser
 
-# Patterns for nodes and mobs
+# Patterns for nodes, mobs, and zones
 item_patterns = [
     re.compile(r"You finished cutting down (.+?)\."),
     re.compile(r"You finished mining (.+?)\."),
     re.compile(r"You finished harvesting (.+?)\."),
 ]
-mob_pattern = re.compile(r"(.+?) (?:is .*?|eyes you|acknowledges you .*?)\.")
+mob_pattern = re.compile(r"^(?!You\b)(.+?) (?:is .*?|eyes you.*?|acknowledges you.*?|can.*?|observes you.*?)\.")
 
 location_pattern = re.compile(r"Your location:\s([\d.-]+)\s([\d.-]+)\s([\d.-]+)")
+
+zone_pattern = re.compile(r"You are in (.+)\.")
 
 # Global variables
 config_file = "config.ini"
@@ -151,11 +153,21 @@ def upload_to_api(item, x, y, z):
         log_message("No API key provided. Skipping API upload.")
         return
 
+    try:
+        # Ensure these are valid floats
+        loc_x = float(x)
+        loc_y = float(y)
+        loc_z = float(z)
+    except (TypeError, ValueError) as e:
+        log_message(f"Invalid coordinates detected: {e}. Skipping upload.")
+        return
+
+    # Construct the payload (zone name is not uploaded to the API)
     payload = {
         "resource": {
-            "loc_x": x,
-            "loc_y": y,
-            "loc_z": z,
+            "loc_x": loc_x,
+            "loc_y": loc_y,
+            "loc_z": loc_z,
             "name": item,
         }
     }
@@ -169,12 +181,14 @@ def upload_to_api(item, x, y, z):
 
 
 def is_unique(existing_entries, new_entry, threshold=10):
-    """Check if a new entry (item + coordinates) is unique."""
-    new_item, new_coords = new_entry[0], new_entry[1:]
-    for existing_item, *existing_coords in existing_entries:
+    """Check if a new entry (mob name + coordinates) is unique."""
+    new_item = new_entry[0]  # Mob name
+    new_coords = new_entry[1:4]  # X, Y, Z (exclude zone name)
+
+    for existing_item, *existing_coords, _ in existing_entries:  # Ignore zone in comparison
         if new_item == existing_item and all(
             abs(float(a) - float(b)) <= threshold
-            for a, b in zip(existing_coords, new_coords)
+            for a, b in zip(existing_coords[:3], new_coords)  # Compare only X, Y, Z
         ):
             return False
     return True
@@ -182,9 +196,16 @@ def is_unique(existing_entries, new_entry, threshold=10):
 
 def process_text(text, existing_entries, threshold=10):
     """Parse the text for matching data pairs and check for duplicates."""
-    lines = text.splitlines()
-    data_pairs = []
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    zone_name = None
 
+    # Extract zone name (search all lines)
+    for line in lines:
+        match_zone = zone_pattern.search(line)
+        if match_zone:
+            zone_name = match_zone.group(1)
+
+    data_pairs = []
     for i in range(len(lines) - 1):
         item = None
         for pattern in item_patterns:
@@ -197,60 +218,53 @@ def process_text(text, existing_entries, threshold=10):
 
         if item and match_location:
             location = match_location.groups()
-            new_entry = (item, *location)
+            new_entry = (item, *location, zone_name)  # Append zone name
             if is_unique(existing_entries, new_entry, threshold):
                 data_pairs.append(new_entry)
                 existing_entries.append(new_entry)
     return data_pairs
 
 
-def process_mob_data(text, existing_entries, writer, threshold=10):
+def process_mob_data(text, existing_entries, writer, file_object, threshold=10):
     """Parse the text for mob data, deduplicate, and write immediately."""
     lines = text.splitlines()
-    combined_entries = []
-    current_mob_info = []
+    zone_name = None
+
+    # Extract zone name (search all lines)
+    for line in lines:
+        match_zone = zone_pattern.search(line)
+        if match_zone:
+            zone_name = match_zone.group(1)
+
+    mob_data = []
     current_location = None
+    current_mob_info = []
 
     for line in lines:
         line = line.strip()  # Remove extra whitespace
+
         if not line:  # Skip blank lines
             continue
-        if "Your location:" in line:
-            # Save the previous mob info if it exists
-            if current_mob_info and current_location:
-                combined_entries.append((current_mob_info, current_location))
-            current_location = line  # Start a new location
-            current_mob_info = []  # Reset mob info
-        else:
-            # Append non-location lines to mob info
-            current_mob_info.append(line)
 
-    # Save the last mob info if it exists
-    if current_mob_info and current_location:
-        combined_entries.append((current_mob_info, current_location))
-
-    mob_data = []
-
-    for mob_info, location_line in combined_entries:
-        match_location = location_pattern.search(location_line)
-        if not match_location:
+        # Match location
+        match_location = location_pattern.search(line)
+        if match_location:
+            current_location = match_location.groups()
             continue
-        location = match_location.groups()  # Extract X, Y, Z
-
-        # Combine all mob-related lines into a single string
-        mob_info_text = " ".join(mob_info)
-        match_mob = mob_pattern.search(mob_info_text)
-
+        # Match mob data
+        match_mob = mob_pattern.search(line)
         if match_mob:
             mob_name = match_mob.group(1)
-            new_entry = (mob_name, *location)
+            if current_location:
+                new_entry = (mob_name, *current_location, zone_name)  # Append zone name
 
-            # Deduplicate entries
-            if is_unique(existing_entries, new_entry, threshold):
-                mob_data.append(new_entry)
-                existing_entries.append(new_entry)
-                writer.writerow(new_entry)  # Write immediately
-                log_message(f"Mob Data Captured: {new_entry}")
+                # Deduplicate entries
+                if is_unique(existing_entries, new_entry, threshold):
+                    mob_data.append(new_entry)
+                    existing_entries.append(new_entry)
+                    writer.writerow(new_entry)  # Write immediately
+                    file_object.flush()  # Flush the file object to prevent data loss
+                    #log_message(f"Mob Data Captured: {mob_name} at {current_location}")
 
     return mob_data
 
@@ -266,44 +280,51 @@ def monitor_screen():
         messagebox.showerror("Error", "Mob CSV file is not set.")
         return
 
-    confirm_files = []
-    if enable_node_tracking:
-        confirm_files.append(f"Node CSV: {node_csv_file}")
-    if enable_mob_tracking:
-        confirm_files.append(f"Mob CSV: {mob_csv_file}")
-
-    if confirm_files:
-        if not messagebox.askyesno("Confirm File Usage", "\n".join(confirm_files)):
-            return
-
     stop_monitoring = False
     node_entries = []
     mob_entries = []
 
-    log_message("Monitoring started.")  # Start message
+    log_message("Monitoring started.")
 
     with open(node_csv_file, mode="a", newline="") as node_file, open(mob_csv_file, mode="a", newline="") as mob_file:
         node_writer = csv.writer(node_file)
         mob_writer = csv.writer(mob_file)
 
+        # Write headers if the files are empty
+        if os.stat(node_csv_file).st_size == 0:
+            node_writer.writerow(["Node Name", "X", "Y", "Z", "Zone Name"])
+        if os.stat(mob_csv_file).st_size == 0:
+            mob_writer.writerow(["Mob Name", "X", "Y", "Z", "Zone Name"])
+
         try:
             while not stop_monitoring:
+                # Take a screenshot of the monitored region
                 screenshot = pyautogui.screenshot(region=(monitor_region["left"], monitor_region["top"],
                                                           monitor_region["width"], monitor_region["height"]))
-                text = pytesseract.image_to_string(screenshot, config="--psm 6", output_type=Output.STRING)
+                text = pytesseract.image_to_string(
+                    screenshot,
+                    config='--psm 6 --oem 3 -c tessedit_char_whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-:(),\' "',
+                    output_type=Output.STRING
+                )
+                screenshot.close()
+                del screenshot
 
                 # Node Tracking
                 if enable_node_tracking:
                     node_data = process_text(text, node_entries)
                     for row in node_data:
-                        node_writer.writerow(row)
+                        node_writer.writerow(row)  # Save zone name to CSV
+                        node_file.flush()  # Flush node file to prevent data loss
                         log_message(f"Node Data Captured: {row}")
                         if enable_api_upload:
-                            upload_to_api(row[0], float(row[1]), float(row[2]), float(row[3]))
+                            upload_to_api(row[0], row[1], row[2], row[3])  # Exclude zone
 
                 # Mob Tracking
                 if enable_mob_tracking:
-                    process_mob_data(text, mob_entries, mob_writer)  # Write immediately
+                    mob_data = process_mob_data(text, mob_entries, mob_writer, mob_file)
+                    for row in mob_data:
+                        log_message(f"Mob Data Captured: {row}")
+                        # No upload to API for mob data
 
                 time.sleep(1)
 
@@ -311,7 +332,7 @@ def monitor_screen():
             log_message(f"An error occurred: {e}")
 
         finally:
-            log_message("Monitoring stopped.")  # Stop message
+            log_message("Monitoring stopped.")
 
 
 def start_monitoring_thread():
