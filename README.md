@@ -96,12 +96,14 @@ Create a macro in-game:
 /loc
 /con
 /loc
+/zonename
 ```
 
 ### For Node Harvesting:
 Use a simple macro:
 ```plaintext
 /loc
+/zonename
 ```
 
 ---
