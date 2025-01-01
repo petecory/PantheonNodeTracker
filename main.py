@@ -38,6 +38,10 @@ enable_node_tracking = True
 enable_mob_tracking = False
 log_queue = []
 config = configparser.ConfigParser()
+enable_loc_auto_click = False
+loc_button_coords = None
+last_loc_click_time = 0
+screenshot_rate = 5
 
 # API Endpoint
 API_ENDPOINT = "https://shalazam.info/api/v1/resources"
@@ -82,8 +86,7 @@ def flush_log_queue():
 
 
 def load_config():
-    """Load configuration from the config.ini file."""
-    global config, api_key, monitor_region, node_csv_file, mob_csv_file
+    global config, api_key, monitor_region, node_csv_file, mob_csv_file, enable_loc_auto_click, loc_button_coords, screenshot_rate
 
     if os.path.exists(config_file):
         config.read(config_file)
@@ -91,6 +94,9 @@ def load_config():
         monitor_region_str = config.get("Settings", "MonitorRegion", fallback="")
         node_csv_file = config.get("Settings", "NodeCSVFile", fallback="")
         mob_csv_file = config.get("Settings", "MobCSVFile", fallback="")
+        enable_loc_auto_click = config.getboolean("Settings", "EnableLocAutoClick", fallback=False)
+        loc_button_coords = eval(config.get("Settings", "LocButtonCoords", fallback="None"))
+        screenshot_rate = config.getint("Settings", "ScreenshotRate", fallback=5)  # Default to 5 per second
 
         if monitor_region_str:
             try:
@@ -103,17 +109,19 @@ def load_config():
 
 
 def save_config():
-    """Save configuration to the config.ini file."""
-    global api_key, monitor_region, node_csv_file, mob_csv_file
+    global api_key, monitor_region, node_csv_file, mob_csv_file, enable_loc_auto_click, loc_button_coords, screenshot_rate
 
     config["Settings"] = {
         "APIKey": api_key,
         "MonitorRegion": str(monitor_region) if monitor_region else "",
         "NodeCSVFile": node_csv_file,
         "MobCSVFile": mob_csv_file,
-        "EnableAPIUpload": str(enable_api_upload.get()),  # Use .get() to extract boolean
+        "EnableAPIUpload": str(enable_api_upload.get()),
         "EnableNodeTracking": str(enable_node_tracking.get()),
         "EnableMobTracking": str(enable_mob_tracking.get()),
+        "EnableLocAutoClick": str(enable_loc_auto_click),
+        "LocButtonCoords": str(loc_button_coords),
+        "ScreenshotRate": str(screenshot_rate),  # Save screenshot rate
     }
     with open(config_file, "w") as file:
         config.write(file)
@@ -130,6 +138,54 @@ def toggle_feature(feature):
     elif feature == "mob":
         enable_mob_tracking = not enable_mob_tracking
     save_config()
+
+
+def toggle_loc_auto_click(value):
+    """Toggle the Loc Auto Click feature based on the checkbox."""
+    global enable_loc_auto_click
+    enable_loc_auto_click = value.get()  # Extract the boolean value from the Tkinter variable
+    log_message(f"Loc Auto Click toggled to: {enable_loc_auto_click}")
+    save_config()  # Save the updated state to the config file
+
+
+def set_loc_button_location():
+    global loc_button_coords
+
+    def on_click(x, y, button, pressed):
+        if pressed:
+            global loc_button_coords
+            loc_button_coords = (x, y)
+            log_message(f"/loc button location set to: {loc_button_coords}")
+            save_config()
+            listener.stop()
+
+    log_message("Click on the /loc button to set its location.")
+    listener = Listener(on_click=on_click)
+    listener.start()
+
+
+def adjust_screenshot_rate(value):
+    """Adjust the number of screenshots taken per second and save to config."""
+    global screenshot_rate
+    screenshot_rate = value
+    log_message(f"Screenshot rate set to: {screenshot_rate} per second")
+    save_config()  # Save the updated rate to the config file
+
+
+def loc_auto_click():
+    global last_loc_click_time, loc_button_coords
+
+    if not enable_loc_auto_click or not loc_button_coords:
+        log_message("Loc auto click is disabled or button location is not set.")
+        return
+
+    current_time = time.time()
+    if current_time - last_loc_click_time >= 3:  # Ensure 3 seconds between clicks
+        pyautogui.click(loc_button_coords)
+        last_loc_click_time = current_time
+        log_message("/loc button clicked automatically.")
+    else:
+        log_message("Cooldown active. Skipping loc click.")
 
 
 def set_file_location(file_type):
@@ -195,17 +251,30 @@ def is_unique(existing_entries, new_entry, threshold=10):
 
 
 def process_text(text, existing_entries, threshold=10):
-    """Parse the text for matching data pairs and check for duplicates."""
+    global enable_loc_auto_click
+
     lines = [line.strip() for line in text.splitlines() if line.strip()]
+    # log_message(f"Processing text: {lines}")  # Debug: log the extracted lines
+
     zone_name = None
 
-    # Extract zone name (search all lines)
+    # Extract zone name (if available)
     for line in lines:
         match_zone = zone_pattern.search(line)
         if match_zone:
             zone_name = match_zone.group(1)
 
     data_pairs = []
+
+    # Check if the last line matches the condition
+    if lines and enable_loc_auto_click:
+        last_line = lines[-1]
+        # log_message(f"Last line for evaluation: {last_line}")
+        if last_line.startswith("You finished"):
+            log_message(f"Triggering loc auto click for last line: {last_line}")
+            loc_auto_click()  # Trigger the /loc auto-click
+
+    # Process other lines for data extraction
     for i in range(len(lines) - 1):
         item = None
         for pattern in item_patterns:
@@ -214,11 +283,11 @@ def process_text(text, existing_entries, threshold=10):
                 item = match_item.group(1)
                 break
 
-        match_location = location_pattern.search(lines[i + 1])
+        match_location = location_pattern.search(lines[i + 1]) if i < len(lines) - 1 else None
 
         if item and match_location:
             location = match_location.groups()
-            new_entry = (item, *location, zone_name)  # Append zone name
+            new_entry = (item, *location, zone_name)
             if is_unique(existing_entries, new_entry, threshold):
                 data_pairs.append(new_entry)
                 existing_entries.append(new_entry)
@@ -271,7 +340,7 @@ def process_mob_data(text, existing_entries, writer, file_object, threshold=10):
 
 def monitor_screen():
     """Monitor the selected screen region for changes."""
-    global stop_monitoring, node_csv_file, mob_csv_file
+    global stop_monitoring, node_csv_file, mob_csv_file, screenshot_rate
 
     if enable_node_tracking and not node_csv_file:
         messagebox.showerror("Error", "Node CSV file is not set.")
@@ -298,6 +367,8 @@ def monitor_screen():
 
         try:
             while not stop_monitoring:
+                start_time = time.time()
+
                 # Take a screenshot of the monitored region
                 screenshot = pyautogui.screenshot(region=(monitor_region["left"], monitor_region["top"],
                                                           monitor_region["width"], monitor_region["height"]))
@@ -326,7 +397,10 @@ def monitor_screen():
                         log_message(f"Mob Data Captured: {row}")
                         # No upload to API for mob data
 
-                time.sleep(1)
+                # Adjust for screenshot rate
+                elapsed_time = time.time() - start_time
+                sleep_time = max(0, 1 / screenshot_rate - elapsed_time)
+                time.sleep(sleep_time)
 
         except Exception as e:
             log_message(f"An error occurred: {e}")
@@ -395,12 +469,23 @@ def save_api_key():
     save_config()  # Save the updated API key
 
 
+def manual_test_loc_click():
+    """Manual test for /loc button click functionality."""
+    if loc_button_coords:
+        log_message("Manually triggering /loc button click.")
+        pyautogui.click(loc_button_coords)
+    else:
+        log_message("No /loc button location set. Please set it first.")
+
+
 def create_gui():
     """Create the GUI for the application."""
     global root, info_window, api_key_entry, enable_api_upload, enable_node_tracking, enable_mob_tracking
 
     root = tk.Tk()
     root.title("Node Tracker")
+    root.geometry("350x400")
+    root.minsize(350, 400)
 
     # Read config values as Python booleans
     enable_api_upload_value = config.getboolean("Settings", "EnableAPIUpload", fallback=False)
@@ -423,13 +508,16 @@ def create_gui():
     # Main Tab
     tk.Label(main_tab, text="Pantheon Node Tracker", font=("Arial", 16)).pack(pady=10)
 
-    tk.Button(main_tab, text="Select Region", command=select_region, width=20).pack(pady=5)
-    tk.Button(main_tab, text="Start Monitoring", command=start_monitoring_thread, width=20).pack(pady=5)
-    tk.Button(main_tab, text="Stop Monitoring", command=stop_monitor, width=20).pack(pady=5)
-    tk.Button(main_tab, text="Exit", command=root.quit, width=20).pack(pady=5)
+    tk.Button(main_tab, text="Select Region", command=select_region, width=20).pack(
+        pady=5)
+    tk.Button(main_tab, text="Start Monitoring", command=start_monitoring_thread,
+              width=10).pack(pady=5)
+    tk.Button(main_tab, text="Stop Monitoring", command=stop_monitor, width=10).pack(
+        pady=5)
+    tk.Button(main_tab, text="Exit", command=root.quit, width=10).pack(pady=5)
 
-    info_window = scrolledtext.ScrolledText(main_tab, width=50, height=15, wrap=tk.WORD)
-    info_window.pack(pady=10)
+    info_window = scrolledtext.ScrolledText(main_tab, wrap=tk.WORD)
+    info_window.pack(expand=True, fill='both', pady=10)  # Allow dynamic resizing
     info_window.insert(tk.END, "Welcome to the Node Tracking Tool!\n")
 
     # Flush any log messages queued before GUI was initialized
@@ -441,35 +529,79 @@ def create_gui():
     root.mainloop()
 
 
-def create_settings_tab(tab):
-    """Create the settings tab in the GUI."""
-    global api_key_entry
+def create_settings_tab(tab_control):
+    global api_key_entry, enable_loc_auto_click_var, screenshot_rate_var
 
-    tk.Label(tab, text="API Key", font=("Arial", 12)).pack(pady=5)
-    api_key_entry = tk.Entry(tab, width=40, show="*")
+    # Create a canvas and scrollbar
+    settings_canvas = tk.Canvas(tab_control, width=350, height=400, highlightthickness=0)
+    settings_scrollbar = tk.Scrollbar(tab_control, orient="vertical", command=settings_canvas.yview)
+    settings_frame = ttk.Frame(settings_canvas)
+
+    # Configure the scrollbar
+    settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
+    settings_canvas.create_window((0, 0), window=settings_frame, anchor="nw")
+
+    # Bind mouse wheel scrolling
+    def on_mouse_wheel(event):
+        settings_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    settings_canvas.bind_all("<MouseWheel>", on_mouse_wheel)  # Windows and MacOS
+    settings_canvas.bind_all("<Button-4>", on_mouse_wheel)   # Linux scroll up
+    settings_canvas.bind_all("<Button-5>", on_mouse_wheel)   # Linux scroll down
+
+    # Adjust scroll region dynamically
+    settings_frame.bind(
+        "<Configure>", lambda e: settings_canvas.configure(scrollregion=settings_canvas.bbox("all"))
+    )
+
+    settings_canvas.pack(side="left", fill="both", expand=True)
+    settings_scrollbar.pack(side="right", fill="y")
+
+    # Add settings widgets to the settings frame
+    tk.Label(settings_frame, text="API Key", font=("Arial", 12)).pack(pady=5)
+    api_key_entry = tk.Entry(settings_frame, width=40, show="*")
     api_key_entry.insert(0, api_key)
     api_key_entry.pack(pady=5)
-    tk.Button(tab, text="Save API Key", command=save_api_key).pack(pady=10)
+    tk.Button(settings_frame, text="Save API Key", command=save_api_key).pack(pady=10)
 
     # Toggles
-    tk.Label(tab, text="Feature Toggles", font=("Arial", 12)).pack(pady=5)
+    tk.Label(settings_frame, text="Feature Toggles", font=("Arial", 12)).pack(pady=5)
+    enable_loc_auto_click_var = tk.BooleanVar(value=enable_loc_auto_click)  # Sync with loaded config
     tk.Checkbutton(
-        tab, text="Enable API Upload", variable=enable_api_upload,
+        settings_frame, text="Enable API Upload", variable=enable_api_upload,
         command=lambda: save_config()
     ).pack(pady=5)
     tk.Checkbutton(
-        tab, text="Enable Node Tracking", variable=enable_node_tracking,
+        settings_frame, text="Enable Node Tracking", variable=enable_node_tracking,
         command=lambda: save_config()
     ).pack(pady=5)
     tk.Checkbutton(
-        tab, text="Enable Mob Tracking", variable=enable_mob_tracking,
+        settings_frame, text="Enable Mob Tracking", variable=enable_mob_tracking,
         command=lambda: save_config()
+    ).pack(pady=5)
+    tk.Checkbutton(
+        settings_frame, text="Enable Loc Auto Click", variable=enable_loc_auto_click_var,
+        command=lambda: toggle_loc_auto_click(enable_loc_auto_click_var)
+    ).pack(pady=5)
+
+    # Screenshot Rate Slider
+    tk.Label(settings_frame, text="Screenshots per Second", font=("Arial", 12)).pack(pady=5)
+    screenshot_rate_var = tk.IntVar(value=screenshot_rate)  # Sync slider with loaded config
+    tk.Scale(
+        settings_frame, from_=1, to=30, orient="horizontal",
+        variable=screenshot_rate_var,
+        command=lambda val: adjust_screenshot_rate(int(val))
     ).pack(pady=5)
 
     # File Locations
-    tk.Label(tab, text="File Locations", font=("Arial", 12)).pack(pady=5)
-    tk.Button(tab, text="Set Node CSV File", command=lambda: set_file_location("node")).pack(pady=5)
-    tk.Button(tab, text="Set Mob CSV File", command=lambda: set_file_location("mob")).pack(pady=5)
+    tk.Label(settings_frame, text="File Locations", font=("Arial", 12)).pack(pady=5)
+    tk.Button(settings_frame, text="Set Node CSV File", command=lambda: set_file_location("node")).pack(pady=5)
+    tk.Button(settings_frame, text="Set Mob CSV File", command=lambda: set_file_location("mob")).pack(pady=5)
+
+    # Loc Button Location
+    tk.Label(settings_frame, text="/loc Button", font=("Arial", 12)).pack(pady=5)
+    tk.Button(settings_frame, text="Set /loc Button Location", command=set_loc_button_location).pack(pady=5)
+    tk.Button(settings_frame, text="Test /loc Button Click", command=manual_test_loc_click).pack(pady=5)
 
 
 if __name__ == "__main__":
